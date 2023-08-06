@@ -4,12 +4,72 @@
 #include <mpi.h>
 #include <fstream>
 #include <string>
-#include <iostream>
 #include <filesystem>
 
 using namespace std;
+#define MAX_ITEMS 256
+using namespace std;
 
-vector<int> cargarImagenPGM(const string &imagenPath) {
+vector<vector<int>> cargarImagenPGM(const string &imagenPath) {
+
+    ifstream archivo(std::filesystem::current_path().parent_path().string() + "/" + imagenPath, ios::binary);
+    if (!archivo) {
+        return {};
+    }
+
+    string tipo;
+    int ancho, alto, max_valor;
+    //para extraer valores
+    archivo >> tipo >> ancho >> alto >> max_valor;
+
+    vector<vector<int>> imagen(alto, vector<int>(ancho));
+
+    for (int i = 0; i < alto; i++) {
+        for (int j = 0; j < ancho; j++) {
+            int valor;
+            archivo >> valor;
+            imagen[i][j] = valor;
+        }
+    }
+    return imagen;
+}
+
+vector<int> histograma_serial(const vector<vector<int>> &imagen) {
+    vector<int> histograma(MAX_ITEMS, 0);
+
+    for (const auto &fila: imagen) {
+        for (int pixel: fila) {
+            histograma[pixel]++;
+        }
+    }
+    return histograma;
+}
+
+vector<int> histograma_omp(const vector<vector<int>> &imagen) {
+
+    vector<int> histograma(MAX_ITEMS, 0);
+
+#pragma omp parallel
+    {
+        std::vector<int> local(MAX_ITEMS, 0);
+#pragma omp for
+        for (const auto &fila: imagen) {
+            for (int pixel: fila) {
+                local[pixel]++;
+            }
+        }
+
+#pragma omp critical
+        {
+            for (int i = 0; i < MAX_ITEMS; i++) {
+                histograma[i] += local[i];
+            }
+        }
+    }
+    return histograma;
+}
+
+vector<int> cargarImagenPGMV2(const string &imagenPath) {
     ifstream archivo(std::filesystem::current_path().parent_path().string() + "/" + imagenPath, ios::binary);
     if (!archivo) {
         return {};
@@ -33,9 +93,19 @@ vector<int> cargarImagenPGM(const string &imagenPath) {
 }
 
 void imprimirHistograma(vector<int> histograma) {
-    fmt::println("Histograma MPi");
-    for (int i = 0; i < 256; ++i) {
-        fmt::println("{}: {}", i, histograma[i]);
+    int desde = 0;
+    int intervalos = 32;
+    for (int n = intervalos; n <= 256; n += intervalos) {
+        int estrellas = 0;
+        for (int i = desde; i < n; i++) {
+            estrellas += histograma[i];
+        }
+        string lines = "";
+        for (int j = 0; j < estrellas / 4000; j++) {
+            lines += "*";
+        }
+        fmt::println("{} - {}: \t{}\t|{}", desde, n, estrellas, lines);
+        desde = n + 1;
     }
 }
 
@@ -61,7 +131,7 @@ int main(int argc, char **argv) {
     int tamanio, bloque;
 
     if (rank_id == 0) {
-        imagen = cargarImagenPGM("intersecciones.pgm");
+        imagen = cargarImagenPGMV2("intersecciones.pgm");
         tamanio = imagen.size();
         bloque = tamanio / nprocs;
 
@@ -84,13 +154,36 @@ int main(int argc, char **argv) {
 
     vector<int> histograma_global(256, 0);
 
+    // Recolectar los histogramas locales
     MPI_Reduce(&histograma_local[0], &histograma_global[0], 256,
-               MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);// Recolectar los histogramas locales
+               MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (rank_id == 0) {
+        fmt::println("Histograma MPI");
         imprimirHistograma(histograma_global);
     }
+//////////////////////////////////version serial y version omp////////////////////////
+    if (rank_id == 0) {
+        vector<vector<int>> imagen = cargarImagenPGM("intersecciones.pgm");
 
+        if (imagen.empty()) {
+            fmt::print("Error al abrir el archivo");
+            return 1;
+        }
+
+        {
+            vector<int> histograma = histograma_serial(imagen);
+            fmt::println("Histograma Serial");
+            imprimirHistograma(histograma);
+        }
+
+        {
+            vector<int> histograma = histograma_omp(imagen);
+            fmt::println("Histograma OMP");
+            imprimirHistograma(histograma);
+        }
+
+    }
     MPI_Finalize();
     return 0;
 }
